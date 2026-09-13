@@ -19,9 +19,12 @@ import sys
 import csv
 import json
 import time
+import random
+import socket
 import hashlib
 import argparse
 import urllib.request
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -86,7 +89,9 @@ class ForensicDatasetCurator:
         self,
         output_dir: str = "data/curated_dataset",
         hf_token: Optional[str] = None,
-        max_workers: int = 8,
+        max_workers: int = 5,
+        batch_size: int = 25,
+        request_delay: float = 1.5,
         phash_threshold: int = 4  # Hamming distance <= 4 considered near-duplicate
     ):
         self.output_dir = Path(output_dir)
@@ -94,6 +99,8 @@ class ForensicDatasetCurator:
         self.images_dir.mkdir(parents=True, exist_ok=True)
         self.hf_token = hf_token or os.getenv("HF_TOKEN")
         self.max_workers = max_workers
+        self.batch_size = batch_size
+        self.request_delay = request_delay
         self.phash_threshold = phash_threshold
 
         self.exact_hashes: Set[str] = set()
@@ -101,11 +108,20 @@ class ForensicDatasetCurator:
         self.manifest_rows: List[Dict] = []
         self.current_id = 1
 
-    def _get_headers(self) -> Dict[str, str]:
-        headers = {"User-Agent": "SignalScope-Curator/1.0"}
+    def _get_hf_api_headers(self) -> Dict[str, str]:
+        headers = {
+            "User-Agent": "SignalScope-Curator/1.0",
+            "Accept": "application/json"
+        }
         if self.hf_token:
             headers["Authorization"] = f"Bearer {self.hf_token}"
         return headers
+
+    def _get_image_headers(self) -> Dict[str, str]:
+        return {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        }
 
     def is_duplicate(self, img_bytes: bytes, pil_img: Image.Image) -> bool:
         """Checks both exact MD5 and perceptual hash distance."""
@@ -210,30 +226,75 @@ class ForensicDatasetCurator:
         self.current_id += 1
         return manifest_entry
 
-    def fetch_open_images_sample(self, offset: int = 0, length: int = 100) -> List[Dict]:
-        """Queries bitmind/open-images-v7 rows endpoint."""
-        url = f"https://datasets-server.huggingface.co/rows?dataset=bitmind%2Fopen-images-v7&config=default&split=train&offset={offset}&length={length}"
-        req = urllib.request.Request(url, headers=self._get_headers())
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return [r["row"] for r in data.get("rows", [])]
+    def _fetch_rows_with_backoff(self, url: str, max_retries: int = 5, initial_backoff: float = 5.0) -> List[Dict]:
+        """
+        Queries Hugging Face dataset server rows endpoint with resilient exponential backoff,
+        Retry-After header parsing, and gateway error handling.
+        """
+        headers = self._get_hf_api_headers()
+        last_exception = None
 
-    def fetch_dragon_sample(self, config: str = "Regular", offset: int = 0, length: int = 100) -> List[Dict]:
-        """Queries lesc-unifi/dragon rows endpoint."""
-        url = f"https://datasets-server.huggingface.co/rows?dataset=lesc-unifi%2Fdragon&config={config}&split=train&offset={offset}&length={length}"
-        req = urllib.request.Request(url, headers=self._get_headers())
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return [r["row"] for r in data.get("rows", [])]
+        for attempt in range(max_retries):
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=25) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    return [r["row"] for r in data.get("rows", [])]
+            except urllib.error.HTTPError as e:
+                last_exception = e
+                if e.code == 429:
+                    retry_after = e.headers.get("Retry-After")
+                    if retry_after and retry_after.strip().isdigit():
+                        wait_time = float(retry_after.strip()) + 1.0
+                    else:
+                        wait_time = initial_backoff * (2 ** attempt) + random.uniform(1.0, 3.0)
+                    print(f"  [Rate Limit 429] Hugging Face rate limit hit. Pausing for {wait_time:.1f}s before retry ({attempt + 1}/{max_retries})...")
+                    time.sleep(wait_time)
+                elif e.code in (500, 502, 503, 504):
+                    wait_time = 3.0 * (attempt + 1) + random.uniform(1.0, 2.0)
+                    print(f"  [Server Error {e.code}] Temporary HF server issue. Retrying in {wait_time:.1f}s ({attempt + 1}/{max_retries})...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"  [HTTP Error {e.code}] {e.reason}")
+                    return []
+            except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+                last_exception = e
+                wait_time = 3.0 * (attempt + 1) + random.uniform(0.5, 1.5)
+                print(f"  [Network Timeout] {e}. Retrying in {wait_time:.1f}s ({attempt + 1}/{max_retries})...")
+                time.sleep(wait_time)
+            except Exception as e:
+                last_exception = e
+                print(f"  [Unexpected Error] {e}")
+                return []
+
+        print(f"  [Notice] All {max_retries} retry attempts exhausted for batch. Last error: {last_exception}")
+        return []
+
+    def fetch_open_images_sample(self, offset: int = 0, length: Optional[int] = None) -> List[Dict]:
+        """Queries bitmind/open-images-v7 rows endpoint with backoff."""
+        batch_len = length or self.batch_size
+        url = f"https://datasets-server.huggingface.co/rows?dataset=bitmind%2Fopen-images-v7&config=default&split=train&offset={offset}&length={batch_len}"
+        return self._fetch_rows_with_backoff(url)
+
+    def fetch_dragon_sample(self, config: str = "Regular", offset: int = 0, length: Optional[int] = None) -> List[Dict]:
+        """Queries lesc-unifi/dragon rows endpoint with backoff."""
+        batch_len = length or self.batch_size
+        url = f"https://datasets-server.huggingface.co/rows?dataset=lesc-unifi%2Fdragon&config={config}&split=train&offset={offset}&length={batch_len}"
+        return self._fetch_rows_with_backoff(url)
 
     def download_url(self, url: str) -> Optional[bytes]:
-        """Downloads raw bytes from URL with headers and timeout."""
-        try:
-            req = urllib.request.Request(url, headers=self._get_headers())
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                return resp.read()
-        except Exception:
-            return None
+        """Downloads raw bytes from URL with clean image headers and 1 timeout retry."""
+        headers = self._get_image_headers()
+        for attempt in range(2):
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    return resp.read()
+            except Exception:
+                if attempt == 0:
+                    time.sleep(0.5)
+                continue
+        return None
 
     def curate_dataset(
         self,
@@ -250,6 +311,9 @@ class ForensicDatasetCurator:
         print("=" * 65)
         print(f"Target Real Images: {target_real} (bitmind/open-images-v7)")
         print(f"Target AI Images:   {target_ai} (lesc-unifi/dragon - 25 generators)")
+        print(f"Batch Size:         {self.batch_size} images/request")
+        print(f"Request Delay:      {self.request_delay}s between batches")
+        print(f"Max Workers:        {self.max_workers} threads")
         print(f"Destination:        {self.output_dir}")
         print("=" * 65)
 
@@ -260,23 +324,24 @@ class ForensicDatasetCurator:
         # -------------------------------------------------------------
         # 1. CURATE REAL IMAGES (Open Images v7)
         # -------------------------------------------------------------
-        print("\n[Phase 1/2] Ingesting Real Images (bitmind/open-images-v7)...")
+        print(f"\n[Phase 1/2] Ingesting Real Images (bitmind/open-images-v7)...")
         real_offset = 0
-        batch_size = 50
+        consecutive_empty_real = 0
 
         while collected_real < target_real:
-            needed = min(batch_size, target_real - collected_real)
-            try:
-                rows = self.fetch_open_images_sample(offset=real_offset, length=needed)
-            except Exception as e:
-                print(f"Warning fetching OpenImages rows at offset {real_offset}: {e}")
-                time.sleep(2)
-                real_offset += needed
-                continue
+            needed = min(self.batch_size, target_real - collected_real)
+            rows = self.fetch_open_images_sample(offset=real_offset, length=needed)
 
             if not rows:
-                break
+                consecutive_empty_real += 1
+                if consecutive_empty_real >= 4:
+                    print(f"  [Notice] Unable to fetch more OpenImages rows at offset {real_offset}. Proceeding to Phase 2.")
+                    break
+                real_offset += needed
+                time.sleep(self.request_delay * 2)
+                continue
 
+            consecutive_empty_real = 0
             real_offset += len(rows)
 
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -301,25 +366,31 @@ class ForensicDatasetCurator:
                     if collected_real >= target_real:
                         break
 
+            # Polite delay between batch requests to prevent rate limiting
+            if collected_real < target_real and self.request_delay > 0:
+                time.sleep(self.request_delay)
+
         # -------------------------------------------------------------
         # 2. CURATE AI IMAGES (DRAGON - 25 Diffusion Models)
         # -------------------------------------------------------------
-        print("\n[Phase 2/2] Ingesting AI Images across 25 generators (lesc-unifi/dragon)...")
+        print(f"\n[Phase 2/2] Ingesting AI Images across 25 generators (lesc-unifi/dragon)...")
         ai_offset = 0
+        consecutive_empty_ai = 0
 
         while collected_ai < target_ai:
-            needed = min(batch_size, target_ai - collected_ai)
-            try:
-                rows = self.fetch_dragon_sample(config=dragon_config, offset=ai_offset, length=needed)
-            except Exception as e:
-                print(f"Warning fetching DRAGON rows at offset {ai_offset}: {e}")
-                time.sleep(2)
-                ai_offset += needed
-                continue
+            needed = min(self.batch_size, target_ai - collected_ai)
+            rows = self.fetch_dragon_sample(config=dragon_config, offset=ai_offset, length=needed)
 
             if not rows:
-                break
+                consecutive_empty_ai += 1
+                if consecutive_empty_ai >= 4:
+                    print(f"  [Notice] Unable to fetch more DRAGON rows at offset {ai_offset}. Proceeding to export.")
+                    break
+                ai_offset += needed
+                time.sleep(self.request_delay * 2)
+                continue
 
+            consecutive_empty_ai = 0
             ai_offset += len(rows)
 
             # Map rows to URLs
@@ -359,6 +430,10 @@ class ForensicDatasetCurator:
                                 print(f"  [AI] Collected {collected_ai}/{target_ai} images (Latest: {gen_model})...")
                     if collected_ai >= target_ai:
                         break
+
+            # Polite delay between batch requests to prevent rate limiting
+            if collected_ai < target_ai and self.request_delay > 0:
+                time.sleep(self.request_delay)
 
         # -------------------------------------------------------------
         # 3. EXPORT AUDITABLE MANIFEST
@@ -411,11 +486,13 @@ class ForensicDatasetCurator:
 def main():
     parser = argparse.ArgumentParser(description="SignalScope Forensic Dataset Curator")
     parser.add_argument("--output_dir", type=str, default="data/curated_dataset", help="Output directory")
-    parser.add_argument("--target_real", type=int, default=100, help="Target number of real images")
-    parser.add_argument("--target_ai", type=int, default=100, help="Target number of AI images")
+    parser.add_argument("--target_real", type=int, default=500, help="Target number of real images")
+    parser.add_argument("--target_ai", type=int, default=500, help="Target number of AI images")
     parser.add_argument("--config", type=str, default="Small", choices=["ExtraSmall", "Small", "Regular", "Large", "ExtraLarge"])
     parser.add_argument("--hf_token", type=str, default=None, help="Optional Hugging Face Auth Token")
-    parser.add_argument("--workers", type=int, default=6, help="Download thread workers")
+    parser.add_argument("--batch_size", type=int, default=25, help="Batch size for Hugging Face rows API (default: 25)")
+    parser.add_argument("--delay", type=float, default=1.5, help="Polite delay (seconds) between batch requests to prevent 429 rate limiting")
+    parser.add_argument("--workers", type=int, default=5, help="Download thread workers (default: 5)")
     parser.add_argument("--sample_test", action="store_true", help="Run 10-sample verification test")
 
     args = parser.parse_args()
@@ -428,7 +505,9 @@ def main():
     curator = ForensicDatasetCurator(
         output_dir=args.output_dir,
         hf_token=args.hf_token,
-        max_workers=args.workers
+        max_workers=args.workers,
+        batch_size=args.batch_size,
+        request_delay=args.delay
     )
     curator.curate_dataset(
         target_real=args.target_real,

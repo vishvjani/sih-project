@@ -100,30 +100,36 @@ Ingests from:
 - **`bitmind/open-images-v7`** (Authentic Real Images)
 - **`lesc-unifi/dragon`** (AI Images across 25 diffusion models)
 
-Applies **exact MD5 deduplication**, **perceptual pHash near-duplicate removal**, **resolution standardization**, and builds `dataset_manifest.csv` with strict seen/unseen generator partitions.""")
+Applies **exact MD5 deduplication**, **perceptual pHash near-duplicate removal**, **resolution standardization**, and builds `dataset_manifest.csv` with strict seen/unseen generator partitions.
+
+> **💡 Rate Limiting Tip**:
+> To bypass Hugging Face public rate limits completely, paste a free read token below (generate one at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)). Even without a token, SignalScope's curator includes polite rate-limiting delays and automatic exponential backoff retries.""")
 
     add_code("""import os
 
-# Optional: Hugging Face Token (leave blank for free anonymous access)
+# Optional: Hugging Face Token (paste for elevated quota; leave blank for anonymous rate-limited mode)
+# Free tokens available at: https://huggingface.co/settings/tokens
 HF_TOKEN = ""  # @param {type:"string"}
 if HF_TOKEN.strip():
     os.environ["HF_TOKEN"] = HF_TOKEN.strip()
     print("✓ Hugging Face Token configured.")
 else:
-    print("ℹ Running with public anonymous access (no token needed).")
+    print("ℹ Running with public anonymous access (curator rate-limiting delays & backoff active).")
 
 # Select Curation Scale for Colab:
-# - 'fast_demo'   : 500 Real + 500 AI (~2-3 mins)
-# - 'benchmark'   : 3,000 Real + 3,000 AI (~15 mins, recommended for Colab GPU)
-# - 'large'       : 10,000 Real + 10,000 AI (~45 mins)
-# - 'full_scale'  : 75,000 Real + 75,000 AI (for multi-hour background training)
-CURATION_SCALE = "benchmark"  # @param ["fast_demo", "benchmark", "large", "full_scale"]
+# - 'fast_demo'   : 300 Real + 300 AI (~2 mins, rapid test)
+# - 'standard'    : 500 Real + 500 AI (~4 mins, recommended safe default)
+# - 'benchmark'   : 800 Real + 800 AI (~7 mins, optimal benchmark target)
+# - 'large'       : 2,000 Real + 2,000 AI (~18 mins)
+# - 'full_scale'  : 10,000 Real + 10,000 AI (for multi-hour background training)
+CURATION_SCALE = "standard"  # @param ["fast_demo", "standard", "benchmark", "large", "full_scale"]
 
 scale_targets = {
-    "fast_demo": (500, 500),
-    "benchmark": (3000, 3000),
-    "large": (10000, 10000),
-    "full_scale": (75000, 75000)
+    "fast_demo": (300, 300),
+    "standard": (500, 500),
+    "benchmark": (800, 800),
+    "large": (2000, 2000),
+    "full_scale": (10000, 10000)
 }
 target_real, target_ai = scale_targets[CURATION_SCALE]
 print(f"Selected Scale: {CURATION_SCALE} -> Target: {target_real} Real + {target_ai} AI images")
@@ -133,7 +139,9 @@ print(f"Selected Scale: {CURATION_SCALE} -> Target: {target_real} Real + {target
     --target_real {target_real} \\
     --target_ai {target_ai} \\
     --config Regular \\
-    --workers 8""")
+    --batch_size 25 \\
+    --delay 1.5 \\
+    --workers 5""")
 
     # Cell 6: Step 5
     add_md("""## Step 5: Data Audit & Forensic Distribution Verification
