@@ -248,26 +248,26 @@ class ForensicDatasetCurator:
                         wait_time = float(retry_after.strip()) + 1.0
                     else:
                         wait_time = initial_backoff * (2 ** attempt) + random.uniform(1.0, 3.0)
-                    print(f"  [Rate Limit 429] Hugging Face rate limit hit. Pausing for {wait_time:.1f}s before retry ({attempt + 1}/{max_retries})...")
+                    print(f"  [Rate Limit 429] Hugging Face rate limit hit. Pausing for {wait_time:.1f}s before retry ({attempt + 1}/{max_retries})...", flush=True)
                     time.sleep(wait_time)
                 elif e.code in (500, 502, 503, 504):
                     wait_time = 3.0 * (attempt + 1) + random.uniform(1.0, 2.0)
-                    print(f"  [Server Error {e.code}] Temporary HF server issue. Retrying in {wait_time:.1f}s ({attempt + 1}/{max_retries})...")
+                    print(f"  [Server Error {e.code}] Temporary HF server issue. Retrying in {wait_time:.1f}s ({attempt + 1}/{max_retries})...", flush=True)
                     time.sleep(wait_time)
                 else:
-                    print(f"  [HTTP Error {e.code}] {e.reason}")
+                    print(f"  [HTTP Error {e.code}] {e.reason}", flush=True)
                     return []
             except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
                 last_exception = e
                 wait_time = 3.0 * (attempt + 1) + random.uniform(0.5, 1.5)
-                print(f"  [Network Timeout] {e}. Retrying in {wait_time:.1f}s ({attempt + 1}/{max_retries})...")
+                print(f"  [Network Timeout] {e}. Retrying in {wait_time:.1f}s ({attempt + 1}/{max_retries})...", flush=True)
                 time.sleep(wait_time)
             except Exception as e:
                 last_exception = e
-                print(f"  [Unexpected Error] {e}")
+                print(f"  [Unexpected Error] {e}", flush=True)
                 return []
 
-        print(f"  [Notice] All {max_retries} retry attempts exhausted for batch. Last error: {last_exception}")
+        print(f"  [Notice] All {max_retries} retry attempts exhausted for batch. Last error: {last_exception}", flush=True)
         return []
 
     def fetch_open_images_sample(self, offset: int = 0, length: Optional[int] = None) -> List[Dict]:
@@ -283,18 +283,14 @@ class ForensicDatasetCurator:
         return self._fetch_rows_with_backoff(url)
 
     def download_url(self, url: str) -> Optional[bytes]:
-        """Downloads raw bytes from URL with clean image headers and 1 timeout retry."""
+        """Downloads raw bytes from URL with clean image headers, fast timeout, and fallback."""
         headers = self._get_image_headers()
-        for attempt in range(2):
-            try:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=12) as resp:
-                    return resp.read()
-            except Exception:
-                if attempt == 0:
-                    time.sleep(0.5)
-                continue
-        return None
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                return resp.read()
+        except Exception:
+            return None
 
     def curate_dataset(
         self,
@@ -306,16 +302,16 @@ class ForensicDatasetCurator:
         """
         Curates balanced, deduplicated dataset with strict unseen-generator split.
         """
-        print("=" * 65)
-        print("     SIGNALSCOPE FORENSIC DATASET CURATOR")
-        print("=" * 65)
-        print(f"Target Real Images: {target_real} (bitmind/open-images-v7)")
-        print(f"Target AI Images:   {target_ai} (lesc-unifi/dragon - 25 generators)")
-        print(f"Batch Size:         {self.batch_size} images/request")
-        print(f"Request Delay:      {self.request_delay}s between batches")
-        print(f"Max Workers:        {self.max_workers} threads")
-        print(f"Destination:        {self.output_dir}")
-        print("=" * 65)
+        print("=" * 65, flush=True)
+        print("     SIGNALSCOPE FORENSIC DATASET CURATOR", flush=True)
+        print("=" * 65, flush=True)
+        print(f"Target Real Images: {target_real} (bitmind/open-images-v7)", flush=True)
+        print(f"Target AI Images:   {target_ai} (lesc-unifi/dragon - 25 generators)", flush=True)
+        print(f"Batch Size:         {self.batch_size} images/request", flush=True)
+        print(f"Request Delay:      {self.request_delay}s between batches", flush=True)
+        print(f"Max Workers:        {self.max_workers} threads", flush=True)
+        print(f"Destination:        {self.output_dir}", flush=True)
+        print("=" * 65, flush=True)
 
         start_time = time.time()
         collected_real = 0
@@ -324,7 +320,7 @@ class ForensicDatasetCurator:
         # -------------------------------------------------------------
         # 1. CURATE REAL IMAGES (Open Images v7)
         # -------------------------------------------------------------
-        print(f"\n[Phase 1/2] Ingesting Real Images (bitmind/open-images-v7)...")
+        print(f"\n[Phase 1/2] Ingesting Real Images (bitmind/open-images-v7)...", flush=True)
         real_offset = 0
         consecutive_empty_real = 0
 
@@ -335,7 +331,7 @@ class ForensicDatasetCurator:
             if not rows:
                 consecutive_empty_real += 1
                 if consecutive_empty_real >= 4:
-                    print(f"  [Notice] Unable to fetch more OpenImages rows at offset {real_offset}. Proceeding to Phase 2.")
+                    print(f"  [Notice] Unable to fetch more OpenImages rows at offset {real_offset}. Proceeding to Phase 2.", flush=True)
                     break
                 real_offset += needed
                 time.sleep(self.request_delay * 2)
@@ -361,8 +357,8 @@ class ForensicDatasetCurator:
                             collected_real += 1
                             if progress_callback:
                                 progress_callback("real", collected_real, target_real)
-                            if collected_real % 25 == 0 or collected_real == target_real:
-                                print(f"  [Real] Collected {collected_real}/{target_real} images...")
+                            if collected_real % 10 == 0 or collected_real == target_real:
+                                print(f"  [Real] Collected {collected_real}/{target_real} images...", flush=True)
                     if collected_real >= target_real:
                         break
 
@@ -373,7 +369,7 @@ class ForensicDatasetCurator:
         # -------------------------------------------------------------
         # 2. CURATE AI IMAGES (DRAGON - 25 Diffusion Models)
         # -------------------------------------------------------------
-        print(f"\n[Phase 2/2] Ingesting AI Images across 25 generators (lesc-unifi/dragon)...")
+        print(f"\n[Phase 2/2] Ingesting AI Images across 25 generators (lesc-unifi/dragon)...", flush=True)
         ai_offset = 0
         consecutive_empty_ai = 0
 
@@ -384,7 +380,7 @@ class ForensicDatasetCurator:
             if not rows:
                 consecutive_empty_ai += 1
                 if consecutive_empty_ai >= 4:
-                    print(f"  [Notice] Unable to fetch more DRAGON rows at offset {ai_offset}. Proceeding to export.")
+                    print(f"  [Notice] Unable to fetch more DRAGON rows at offset {ai_offset}. Proceeding to export.", flush=True)
                     break
                 ai_offset += needed
                 time.sleep(self.request_delay * 2)
@@ -426,10 +422,14 @@ class ForensicDatasetCurator:
                             collected_ai += 1
                             if progress_callback:
                                 progress_callback("ai", collected_ai, target_ai)
-                            if collected_ai % 25 == 0 or collected_ai == target_ai:
-                                print(f"  [AI] Collected {collected_ai}/{target_ai} images (Latest: {gen_model})...")
+                            if collected_ai % 10 == 0 or collected_ai == target_ai:
+                                print(f"  [AI] Collected {collected_ai}/{target_ai} images (Latest: {gen_model})...", flush=True)
                     if collected_ai >= target_ai:
                         break
+
+            # Polite delay between batch requests to prevent rate limiting
+            if collected_ai < target_ai and self.request_delay > 0:
+                time.sleep(self.request_delay)
 
             # Polite delay between batch requests to prevent rate limiting
             if collected_ai < target_ai and self.request_delay > 0:
