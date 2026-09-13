@@ -1,0 +1,8 @@
+{
+  "model": "SignalScope Dual-Stream ConvNeXt-Tiny",
+  "calibration_temperature": 0.8608,
+  "calibration_method": "Platt Scaling (Temperature Scaling)",
+  "best_val_loss": 0.5029,
+  "total_parameters": 748153,
+  "trainable_parameters": 748152
+}

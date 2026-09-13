@@ -32,3 +32,6 @@ Thumbs.db
 
 # PDF and large files
 *.pdf
+*.pth
+*.pt
+!repo/model/weights/.gitkeep

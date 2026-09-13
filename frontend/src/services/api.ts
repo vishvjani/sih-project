@@ -1,6 +1,6 @@
 import type { AnalysisResult, BatchAnalysisResponse, ModelMetrics, RobustnessTestResult } from '../types';
 
-const API_BASE_URL = 'http://localhost:8000/api/v1';
+const API_BASE_URL = (import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL.replace(/\/+$/, '')}/api/v1` : 'http://localhost:8000/api/v1');
 
 // Generate procedural realistic Grad-CAM heatmap canvas
 export function generateProceduralHeatmap(isAi: boolean, width = 400, height = 400): string {

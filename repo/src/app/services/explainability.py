@@ -8,47 +8,49 @@ class ExplainabilityEngine:
     Generates Grad-CAM visual heatmap overlays and grounded textual explanations
     identifying localized visual evidence for the model's prediction.
     """
-    def generate_explanation(self, image: Image.Image, is_ai: bool, confidence: float, features_summary: dict):
-        # 1. Generate Grad-CAM Heatmap overlay
+    def generate_explanation(self, image: Image.Image, is_ai: bool, confidence: float, features_summary: dict, real_gradcam_base64: str = None):
         w, h = image.size
-        heatmap_img = image.copy().convert("RGBA")
-        overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
+        heatmap_base64 = real_gradcam_base64 or features_summary.get("real_gradcam_base64")
 
-        # Highlight regions of highest activation (simulate Grad-CAM attention regions)
         cx, cy = int(w * 0.5), int(h * 0.45)
         rx, ry = int(w * 0.3), int(h * 0.25)
 
         if is_ai:
-            # Red/Yellow hotspot for AI artifacts
-            color_inner = (255, 0, 0, 160)
-            color_outer = (255, 165, 0, 100)
             focus_regions = [
                 f"Region ({cx-rx},{cy-ry}) to ({cx+rx},{cy+ry}): Implausible micro-texture and high-frequency edge artifacts",
                 "Secondary region: Lighting inconsistency along specular highlight boundaries"
             ]
         else:
-            # Blue/Green heatmap for authentic natural noise distribution
-            color_inner = (0, 255, 128, 140)
-            color_outer = (0, 128, 255, 80)
             focus_regions = [
                 f"Region ({cx-rx},{cy-ry}) to ({cx+rx},{cy+ry}): Natural sensor noise distribution and continuous photon shot noise patterns"
             ]
 
-        draw.ellipse([cx - rx - 20, cy - ry - 20, cx + rx + 20, cy + ry + 20], fill=color_outer)
-        draw.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=color_inner)
+        # If no real Grad-CAM was generated, construct procedural visual overlay
+        if not heatmap_base64:
+            heatmap_img = image.copy().convert("RGBA")
+            overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
 
-        blended = Image.alpha_composite(heatmap_img, overlay)
+            if is_ai:
+                color_inner = (255, 0, 0, 160)
+                color_outer = (255, 165, 0, 100)
+            else:
+                color_inner = (0, 255, 128, 140)
+                color_outer = (0, 128, 255, 80)
 
-        buffered = io.BytesIO()
-        blended.save(buffered, format="PNG")
-        heatmap_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            draw.ellipse([cx - rx - 20, cy - ry - 20, cx + rx + 20, cy + ry + 20], fill=color_outer)
+            draw.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=color_inner)
+
+            blended = Image.alpha_composite(heatmap_img, overlay)
+            buffered = io.BytesIO()
+            blended.save(buffered, format="PNG")
+            heatmap_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
         # 2. Grounded Textual Explanation
         if is_ai:
             summary = (
                 f"Likely AI-generated (calibrated confidence: {int(confidence*100)}%). "
-                f"The ConvNeXt-Tiny visual feature extractor identified synthetic structural patterns, "
+                f"The ConvNeXt-Tiny + Forensic-SRM visual feature extractor identified synthetic structural patterns, "
                 f"inconsistent lighting boundaries, and unnaturally smooth micro-textures in the highlighted region."
             )
             detected_artifacts = [

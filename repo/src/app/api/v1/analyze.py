@@ -23,7 +23,8 @@ def process_single_image(image_bytes: bytes, filename: str) -> dict:
         image=inf_res["image"],
         is_ai=cal_res["is_ai_generated"],
         confidence=cal_res["calibrated_confidence"],
-        features_summary=inf_res["features_summary"]
+        features_summary=inf_res["features_summary"],
+        real_gradcam_base64=inf_res.get("real_gradcam_base64")
     )
     attr_res = generator_attribution_service.predict_attribution(
         is_ai=cal_res["is_ai_generated"],
