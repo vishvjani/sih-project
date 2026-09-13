@@ -117,31 +117,29 @@ else:
     print("ℹ Running with public anonymous access (curator rate-limiting delays & backoff active).")
 
 # Select Curation Scale for Colab:
-# - 'fast_demo'   : 300 Real + 300 AI (~2 mins, rapid test)
-# - 'standard'    : 500 Real + 500 AI (~4 mins, recommended safe default)
-# - 'benchmark'   : 800 Real + 800 AI (~7 mins, optimal benchmark target)
-# - 'large'       : 2,000 Real + 2,000 AI (~18 mins)
-# - 'full_scale'  : 10,000 Real + 10,000 AI (for multi-hour background training)
-CURATION_SCALE = "standard"  # @param ["fast_demo", "standard", "benchmark", "large", "full_scale"]
+# - 'fast_demo'   : 500 Real + 500 AI (~2-3 mins, rapid test)
+# - 'benchmark'   : 3,000 Real + 3,000 AI (~12 mins, balanced benchmark)
+# - 'large'       : 10,000 Real + 10,000 AI (~35 mins)
+# - 'full_scale'  : 75,000 Real + 75,000 AI (150,000 total images, multi-hour zero-crash streaming)
+CURATION_SCALE = "full_scale"  # @param ["fast_demo", "benchmark", "large", "full_scale"]
 
 scale_targets = {
-    "fast_demo": (300, 300),
-    "standard": (500, 500),
-    "benchmark": (800, 800),
-    "large": (2000, 2000),
-    "full_scale": (10000, 10000)
+    "fast_demo": (500, 500),
+    "benchmark": (3000, 3000),
+    "large": (10000, 10000),
+    "full_scale": (75000, 75000)
 }
 target_real, target_ai = scale_targets[CURATION_SCALE]
-print(f"Selected Scale: {CURATION_SCALE} -> Target: {target_real} Real + {target_ai} AI images")
+print(f"Selected Scale: {CURATION_SCALE} -> Target: {target_real:,} Real + {target_ai:,} AI images (Total: {target_real + target_ai:,})")
+print("⚡ Zero-Crash Paced Ingestion Active: Rate-limited workers + Exponential Backoff + Auto-Checkpoint Resumption.")
 
 !python data/curator.py \\
     --output_dir "data/curated_dataset" \\
     --target_real {target_real} \\
     --target_ai {target_ai} \\
-    --config Regular \\
-    --batch_size 25 \\
-    --delay 1.5 \\
-    --workers 5""")
+    --config ExtraLarge \\
+    --workers 5 \\
+    --delay 0.05""")
 
     # Cell 6: Step 5
     add_md("""## Step 5: Data Audit & Forensic Distribution Verification
