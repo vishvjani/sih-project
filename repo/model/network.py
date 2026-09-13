@@ -31,7 +31,7 @@ class SignalScopeModel(nn.Module):
     def __init__(
         self,
         pretrained: bool = True,
-        num_attribution_classes: int = 4,
+        num_attribution_classes: int = 6,
         temperature: float = 1.15,
         dropout_rate: float = 0.3
     ):
@@ -81,8 +81,7 @@ class SignalScopeModel(nn.Module):
             nn.Linear(128, 1)
         )
 
-        # 5. Generator Attribution Head (Bonus B)
-        # Classes: 0: Pristine Real, 1: Latent Diffusion, 2: GAN, 3: Autoregressive / Other
+        # 5. Generator Attribution Head (6 Families: Real, Latent Diffusion, Flow Matching/DiT, Frontier, GAN, Novel)
         self.attribution_head = nn.Sequential(
             nn.Linear(512, 128),
             nn.GELU(),
@@ -146,14 +145,22 @@ class SignalScopeModel(nn.Module):
             for param in self.features.parameters():
                 param.requires_grad = True
 
+    def extract_embeddings(self, x: torch.Tensor) -> torch.Tensor:
+        """Extracts 512-d L2-normalized forensic embeddings for prototype attribution."""
+        fused = self.extract_features(x)
+        return F.normalize(fused, p=2, dim=1)
+
     def predict_calibrated(self, x: torch.Tensor):
         """
         Performs inference with Platt (Temperature Scaled) Calibration.
-        Returns dictionary of numpy probability arrays.
+        Returns dictionary of numpy probability arrays and normalized embeddings.
         """
         self.eval()
         with torch.no_grad():
-            binary_logits, attribution_logits = self.forward(x)
+            fused = self.extract_features(x)
+            binary_logits = self.classifier(fused)
+            attribution_logits = self.attribution_head(fused)
+            norm_embeddings = F.normalize(fused, p=2, dim=1)
             
             raw_prob_ai = torch.sigmoid(binary_logits)
             calibrated_logits = binary_logits / self.temperature.clamp(min=0.01)
@@ -163,7 +170,8 @@ class SignalScopeModel(nn.Module):
             return {
                 "raw_prob_ai": raw_prob_ai.cpu().numpy(),
                 "calibrated_prob_ai": calibrated_prob_ai.cpu().numpy(),
-                "attribution_probs": attribution_probs.cpu().numpy()
+                "attribution_probs": attribution_probs.cpu().numpy(),
+                "embeddings": norm_embeddings.cpu().numpy()
             }
 
     def set_temperature(self, temp: float):

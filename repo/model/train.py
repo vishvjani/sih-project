@@ -23,7 +23,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from .network import SignalScopeModel
-from .dataset import create_dataset_from_directory
+from .dataset import load_dataset, create_dataset_from_directory
 
 
 def fit_temperature(model: SignalScopeModel, val_loader, device: str = "cuda") -> float:
@@ -152,7 +152,7 @@ def run_training(args):
     save_path = Path(args.save_dir)
     save_path.mkdir(parents=True, exist_ok=True)
 
-    # 1. Dataset Loading
+    # 1. Dataset Loading (Manifest or Directory)
     if not os.path.exists(args.data_dir):
         print(f"Notice: Data directory {args.data_dir} not found. Synthesizing dummy dataset for pipeline verification...")
         dummy_dir = save_path / "dummy_data"
@@ -164,8 +164,20 @@ def run_training(args):
             Image.new("RGB", (224, 224), (50, 100, 200)).save(dummy_dir / "FAKE" / f"fake_{i}.jpg")
         args.data_dir = str(dummy_dir)
 
-    train_ds, train_loader = create_dataset_from_directory(args.data_dir, split="train", batch_size=args.batch_size)
-    val_ds, val_loader = create_dataset_from_directory(args.data_dir, split="test", batch_size=args.batch_size)
+    train_ds, train_loader = load_dataset(args.data_dir, split="train", batch_size=args.batch_size)
+    val_ds, val_loader = load_dataset(args.data_dir, split="val" if (Path(args.data_dir)/"dataset_manifest.csv").exists() else "test", batch_size=args.batch_size)
+
+    # Check for held-out unseen test split
+    unseen_loader = None
+    try:
+        if (Path(args.data_dir) / "dataset_manifest.csv").exists():
+            unseen_ds, unseen_loader = load_dataset(args.data_dir, split="test_unseen", batch_size=args.batch_size)
+            if len(unseen_ds) > 0:
+                print(f"Loaded {len(unseen_ds)} held-out UNSEEN generator test samples for real-time generalization tracking.")
+            else:
+                unseen_loader = None
+    except Exception:
+        unseen_loader = None
 
     print(f"Successfully loaded {len(train_ds)} train samples and {len(val_ds)} validation samples.")
 
@@ -178,7 +190,7 @@ def run_training(args):
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
 
     best_val_loss = float("inf")
-    history = {"phase1_train": [], "phase1_val": [], "phase2_train": [], "phase2_val": []}
+    history = {"phase1_train": [], "phase1_val": [], "phase2_train": [], "phase2_val": [], "unseen_test": []}
 
     # -------------------------------------------------------------
     # PHASE 1: LINEAR PROBE (Frozen Backbone)
@@ -197,12 +209,19 @@ def run_training(args):
             t0 = time.time()
             t_loss, t_acc = train_epoch(model, train_loader, optimizer_p1, criterion_bin, criterion_attr, device, scaler, use_amp)
             v_loss, v_acc = validate(model, val_loader, criterion_bin, criterion_attr, device, use_amp)
+            
+            u_acc_str = ""
+            if unseen_loader:
+                _, u_acc = validate(model, unseen_loader, criterion_bin, criterion_attr, device, use_amp)
+                history["unseen_test"].append({"epoch": ep, "acc": u_acc})
+                u_acc_str = f" | Unseen Gen Acc: {u_acc:.3%}"
+
             scheduler_p1.step()
             el = time.time() - t0
 
             history["phase1_train"].append({"epoch": ep, "loss": t_loss, "acc": t_acc})
             history["phase1_val"].append({"epoch": ep, "loss": v_loss, "acc": v_acc})
-            print(f"[Phase 1] Epoch {ep}/{args.phase1_epochs} ({el:.1f}s) - Train Loss: {t_loss:.4f}, Acc: {t_acc:.3%} | Val Loss: {v_loss:.4f}, Acc: {v_acc:.3%}")
+            print(f"[Phase 1] Epoch {ep}/{args.phase1_epochs} ({el:.1f}s) - Train Loss: {t_loss:.4f}, Acc: {t_acc:.3%} | Val Loss: {v_loss:.4f}, Acc: {v_acc:.3%}{u_acc_str}")
 
             if v_loss < best_val_loss:
                 best_val_loss = v_loss
@@ -238,12 +257,19 @@ def run_training(args):
             t0 = time.time()
             t_loss, t_acc = train_epoch(model, train_loader, optimizer_p2, criterion_bin, criterion_attr, device, scaler, use_amp)
             v_loss, v_acc = validate(model, val_loader, criterion_bin, criterion_attr, device, use_amp)
+            
+            u_acc_str = ""
+            if unseen_loader:
+                _, u_acc = validate(model, unseen_loader, criterion_bin, criterion_attr, device, use_amp)
+                history["unseen_test"].append({"epoch": ep, "acc": u_acc})
+                u_acc_str = f" | Unseen Gen Acc: {u_acc:.3%}"
+
             scheduler_p2.step()
             el = time.time() - t0
 
             history["phase2_train"].append({"epoch": ep, "loss": t_loss, "acc": t_acc})
             history["phase2_val"].append({"epoch": ep, "loss": v_loss, "acc": v_acc})
-            print(f"[Phase 2] Epoch {ep}/{args.phase2_epochs} ({el:.1f}s) - Train Loss: {t_loss:.4f}, Acc: {t_acc:.3%} | Val Loss: {v_loss:.4f}, Acc: {v_acc:.3%}")
+            print(f"[Phase 2] Epoch {ep}/{args.phase2_epochs} ({el:.1f}s) - Train Loss: {t_loss:.4f}, Acc: {t_acc:.3%} | Val Loss: {v_loss:.4f}, Acc: {v_acc:.3%}{u_acc_str}")
 
             if v_loss < best_val_loss:
                 best_val_loss = v_loss

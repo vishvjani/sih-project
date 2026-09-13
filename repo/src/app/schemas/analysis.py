@@ -14,6 +14,10 @@ class GroundedExplanation(BaseModel):
 class GeneratorAttribution(BaseModel):
     predicted_family: str = Field(..., description="Predicted generator family (e.g., Diffusion, GAN, Pristine/Camera, Unseen Generator)")
     top_candidates: Dict[str, float] = Field(..., description="Likelihood probabilities across candidate generator architectures")
+    predicted_model: Optional[str] = Field(None, description="Specific generative model name if identified")
+    forensic_fingerprint: Optional[str] = Field(None, description="Characteristic forensic noise fingerprint")
+    is_unseen_architecture: Optional[bool] = Field(None, description="Whether the architecture is an unseen or novel generator")
+    attribution_rationale: Optional[str] = Field(None, description="Forensic rationale behind the model attribution")
 
 class MetadataProvenance(BaseModel):
     has_exif: bool = Field(..., description="Whether valid EXIF metadata is present")

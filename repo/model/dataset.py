@@ -85,12 +85,20 @@ def get_transforms(is_train: bool = True, img_size: int = 224):
 class ImageAuthenticityDataset(Dataset):
     """
     Dataset loader for binary Real vs AI-Generated image classification
-    with optional generator attribution labels.
+    with fine-grained generator attribution labels and metadata.
     """
-    def __init__(self, file_paths: List[str], labels: List[int], attribution_labels: Optional[List[int]] = None, transform=None):
+    def __init__(
+        self,
+        file_paths: List[str],
+        labels: List[int],
+        attribution_labels: Optional[List[int]] = None,
+        generator_names: Optional[List[str]] = None,
+        transform=None
+    ):
         self.file_paths = file_paths
         self.labels = labels
         self.attribution_labels = attribution_labels or [0 if l == 0 else 1 for l in labels]
+        self.generator_names = generator_names or ["Unknown" for _ in labels]
         self.transform = transform or get_transforms(is_train=False)
 
     def __len__(self):
@@ -110,6 +118,69 @@ class ImageAuthenticityDataset(Dataset):
         attr_label = torch.tensor(self.attribution_labels[idx], dtype=torch.long)
 
         return image, binary_label, attr_label
+
+
+def create_dataset_from_manifest(
+    manifest_path_or_dir: str,
+    split: str = "train",
+    img_size: int = 224,
+    batch_size: int = 32,
+    num_workers: int = 2
+):
+    """
+    Constructs DataLoader from auditable dataset_manifest.csv.
+    Supports splits: 'train', 'val', 'test_unseen', 'test_seen', 'test'
+    """
+    import csv
+    manifest_file = Path(manifest_path_or_dir)
+    if manifest_file.is_dir():
+        manifest_file = manifest_file / "dataset_manifest.csv"
+
+    images_dir = manifest_file.parent / "images"
+
+    file_paths = []
+    labels = []
+    attr_labels = []
+    gen_names = []
+
+    with open(manifest_file, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            row_split = row.get("split", "train")
+            # If user asks for 'test', include both 'test_unseen' and 'test_seen'
+            if split == "test":
+                if "test" not in row_split:
+                    continue
+            elif row_split != split:
+                continue
+
+            img_p = images_dir / row["filename"]
+            if img_p.exists():
+                file_paths.append(str(img_p))
+                labels.append(int(row["label"]))
+                attr_labels.append(int(row.get("generator_family_id", 0)))
+                gen_names.append(row.get("generator", "Unknown"))
+
+    is_train = (split == "train")
+    dataset = ImageAuthenticityDataset(
+        file_paths=file_paths,
+        labels=labels,
+        attribution_labels=attr_labels,
+        generator_names=gen_names,
+        transform=get_transforms(is_train=is_train, img_size=img_size)
+    )
+
+    effective_workers = 0 if (os.name == "nt" or len(file_paths) < 100) else num_workers
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=is_train,
+        num_workers=effective_workers,
+        pin_memory=True if torch.cuda.is_available() else False
+    )
+
+    return dataset, loader
 
 
 def create_dataset_from_directory(root_dir: str, split: str = "train", img_size: int = 224, batch_size: int = 32, num_workers: int = 2):
@@ -155,7 +226,6 @@ def create_dataset_from_directory(root_dir: str, split: str = "train", img_size:
         transform=get_transforms(is_train=is_train, img_size=img_size)
     )
 
-    # Automatically set num_workers to 0 on Windows or if running simple test to prevent spawn overhead
     effective_workers = 0 if (os.name == 'nt' or len(file_paths) < 100) else num_workers
 
     loader = DataLoader(
@@ -167,3 +237,28 @@ def create_dataset_from_directory(root_dir: str, split: str = "train", img_size:
     )
 
     return dataset, loader
+
+
+def load_dataset(source: str, split: str = "train", img_size: int = 224, batch_size: int = 32, num_workers: int = 2):
+    """
+    Universal dataset factory:
+    Automatically detects if source is a manifest-based curated dataset or standard folder.
+    """
+    path = Path(source)
+    if (path / "dataset_manifest.csv").exists() or (path.suffix == ".csv" and path.exists()):
+        return create_dataset_from_manifest(
+            manifest_path_or_dir=source,
+            split=split,
+            img_size=img_size,
+            batch_size=batch_size,
+            num_workers=num_workers
+        )
+    else:
+        return create_dataset_from_directory(
+            root_dir=source,
+            split=split,
+            img_size=img_size,
+            batch_size=batch_size,
+            num_workers=num_workers
+        )
+
